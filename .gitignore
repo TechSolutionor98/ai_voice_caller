@@ -1,0 +1,12 @@
+models/
+voice_samples/
+generated_audio/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+*.log
+.env
