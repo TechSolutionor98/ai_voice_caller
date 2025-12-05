@@ -130,6 +130,7 @@ def generate_speech(text, output_path, language='en', speed=1.0, pitch=1.0, voic
             'en': 'en',
             'ur': 'ur',
             'ar': 'ar',
+            'ar-ae': 'ar',  # Dubai Arabic uses standard Arabic TTS
             'es': 'es',
             'hi': 'hi',
             'fr': 'fr',
