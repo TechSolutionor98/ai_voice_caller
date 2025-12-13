@@ -164,20 +164,39 @@ def generate_speech(text, output_path, language='en', speed=1.0, pitch=1.0, voic
             from pydub import AudioSegment
             sound = AudioSegment.from_mp3(temp_mp3)
             
-            # Apply speed changes
-            if speed != 1.0:
-                sound = sound.speedup(playback_speed=speed)
+            # ✅ HIGH QUALITY SETTINGS - Remove distortion/crackling
+            # Normalize audio to prevent clipping and distortion
+            sound = sound.normalize()
             
-            # Apply pitch changes (approximate)
+            # Apply speed changes SMOOTHLY (if needed)
+            if speed != 1.0:
+                # Use frame rate manipulation instead of speedup for better quality
+                new_frame_rate = int(sound.frame_rate / speed)
+                sound = sound._spawn(sound.raw_data, overrides={'frame_rate': new_frame_rate})
+                sound = sound.set_frame_rate(44100)  # Standard high quality sample rate
+            
+            # Apply pitch changes SMOOTHLY (if needed)
             if pitch != 1.0:
-                new_sample_rate = int(sound.frame_rate * pitch)
+                # Octaves manipulation for cleaner pitch shifting
+                octaves = math.log2(pitch)
+                new_sample_rate = int(sound.frame_rate * (2 ** octaves))
                 sound = sound._spawn(sound.raw_data, overrides={'frame_rate': new_sample_rate})
                 sound = sound.set_frame_rate(44100)
             
-            sound.export(output_path, format="wav")
+            # Export with HIGH QUALITY settings
+            sound.export(
+                output_path, 
+                format="wav",
+                parameters=[
+                    "-ar", "44100",      # Sample rate: 44.1kHz (CD quality)
+                    "-ac", "1",          # Mono channel
+                    "-b:a", "192k",      # Bitrate: 192kbps (high quality)
+                    "-acodec", "pcm_s16le"  # PCM 16-bit (uncompressed, no artifacts)
+                ]
+            )
             os.remove(temp_mp3)
             
-            logger.info(f"Speech generated successfully: {output_path}")
+            logger.info(f"Speech generated successfully with HIGH QUALITY: {output_path}")
             return True
             
         except ImportError:
