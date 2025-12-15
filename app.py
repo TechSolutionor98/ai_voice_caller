@@ -66,14 +66,20 @@ def generate_speech(text, output_path, language='en', speed=1.0, pitch=1.0, voic
     Falls back through multiple engines for reliability
     voice_type: 'male', 'female', 'child', or 'default'
     """
-    # For non-English languages, always use gTTS (better language support)
-    # pyttsx3 mainly supports English voices
-    use_pyttsx3 = (voice_type and voice_type != 'default' and language == 'en')
+    # ✅ DYNAMIC: Only convert 'default' to 'male' for English, but respect user's choice
+    if voice_type == 'default' or not voice_type:
+        # Only for English, default to male (gTTS female is default for other languages)
+        voice_type = 'male' if language == 'en' else 'default'
+        logger.info(f"🔄 Voice type was empty/default, using: {voice_type} for {language}")
     
-    # If specific voice type requested for English, use pyttsx3 first
-    if use_pyttsx3:
+    # ✅ Use pyttsx3 for English when SPECIFIC voice type is requested (male/female/child)
+    # For non-English languages, use gTTS because Windows pyttsx3 only has English voices
+    use_pyttsx3_first = (voice_type in ['male', 'female', 'child'] and language == 'en')
+    
+    # Try pyttsx3 first for English with specific voice type
+    if use_pyttsx3_first:
         try:
-            logger.info(f"Using pyttsx3 for voice type: {voice_type}")
+            logger.info(f"🎤 Using pyttsx3 for voice type: {voice_type} (language: {language})")
             engine = pyttsx3.init()
             
             # Set properties
@@ -86,13 +92,15 @@ def generate_speech(text, output_path, language='en', speed=1.0, pitch=1.0, voic
             # Try to find matching voice by type and language
             voices = engine.getProperty('voices')
             voice_keywords = {
-                'male': ['david', 'mark', 'male', 'man', 'james'],
-                'female': ['zira', 'hazel', 'female', 'woman', 'susan', 'mary'],
+                'male': ['david', 'mark', 'male', 'man', 'james', 'george'],
+                'female': ['zira', 'hazel', 'female', 'woman', 'susan', 'mary', 'linda'],
                 'child': ['child', 'kid', 'young']
             }
             
             keywords = voice_keywords.get(voice_type.lower(), [])
             selected = False
+            
+            logger.info(f"🔍 Searching for {voice_type} voice in {len(voices)} available voices...")
             
             # Try to match language + voice type
             for voice in voices:
@@ -100,23 +108,28 @@ def generate_speech(text, output_path, language='en', speed=1.0, pitch=1.0, voic
                 voice_langs = getattr(voice, 'languages', [])
                 
                 # Check if voice matches language and type
-                lang_match = any(language in str(lang) for lang in voice_langs) if voice_langs else True
-                type_match = any(keyword in voice_name for keyword in keywords) if keywords else True
+                lang_match = any(language.split('-')[0] in str(lang).lower() for lang in voice_langs) if voice_langs else True
+                type_match = any(keyword in voice_name for keyword in keywords) if keywords else False
                 
                 if lang_match and type_match:
                     engine.setProperty('voice', voice.id)
-                    logger.info(f"Selected voice: {voice.name} (lang: {language}, type: {voice_type})")
+                    logger.info(f"✅ Selected PERFECT match: {voice.name} (lang: {language}, type: {voice_type})")
                     selected = True
                     break
             
-            # Fallback: just match type if language not found
+            # Fallback: just match type (any language)
             if not selected and keywords:
                 for voice in voices:
                     voice_name = voice.name.lower()
                     if any(keyword in voice_name for keyword in keywords):
                         engine.setProperty('voice', voice.id)
-                        logger.info(f"Selected voice: {voice.name} (type: {voice_type})")
+                        logger.info(f"✅ Selected voice by TYPE: {voice.name} (type: {voice_type})")
+                        selected = True
                         break
+            
+            # If no specific voice found, use default but log warning
+            if not selected:
+                logger.warning(f"⚠️ Could not find {voice_type} voice, using system default")
             
             # Adjust pitch by modifying rate
             if pitch != 1.0:
@@ -127,11 +140,11 @@ def generate_speech(text, output_path, language='en', speed=1.0, pitch=1.0, voic
             engine.save_to_file(text, output_path)
             engine.runAndWait()
             
-            logger.info(f"Speech generated with pyttsx3 ({voice_type}): {output_path}")
+            logger.info(f"✅ Speech generated with pyttsx3 ({voice_type}): {output_path}")
             return True
             
         except Exception as e:
-            logger.warning(f"pyttsx3 failed: {str(e)}, falling back to gTTS")
+            logger.warning(f"⚠️ pyttsx3 failed: {str(e)}, falling back to gTTS")
     
     # Default: Use gTTS for reliability and language support
     try:
@@ -151,6 +164,7 @@ def generate_speech(text, output_path, language='en', speed=1.0, pitch=1.0, voic
         
         gtts_lang = lang_map.get(language, 'en')
         logger.info(f"Using gTTS with language code: {gtts_lang} (from input: {language})")
+        logger.info(f"⚠️ NOTE: gTTS doesn't support voice_type selection - using audio manipulation for voice effect")
         
         # Generate with gTTS
         tts = gTTS(text=text, lang=gtts_lang, slow=(speed < 0.8))
@@ -159,10 +173,35 @@ def generate_speech(text, output_path, language='en', speed=1.0, pitch=1.0, voic
         temp_mp3 = output_path.replace('.wav', '_temp.mp3')
         tts.save(temp_mp3)
         
-        # Convert MP3 to WAV using simple conversion
+        # Convert MP3 to WAV and apply voice effects
         try:
             from pydub import AudioSegment
             sound = AudioSegment.from_mp3(temp_mp3)
+            
+            # ✅ APPLY VOICE TYPE EFFECT using audio manipulation
+            logger.info(f"🎛️ Applying {voice_type} voice effect to gTTS audio...")
+            
+            # Male voice: Lower pitch (slower playback rate) 
+            if voice_type == 'male':
+                logger.info("👨 Creating male voice effect: lowering pitch by 15%")
+                # Lower frame rate = deeper voice
+                new_frame_rate = int(sound.frame_rate * 0.85)  # 15% lower
+                sound = sound._spawn(sound.raw_data, overrides={'frame_rate': new_frame_rate})
+                sound = sound.set_frame_rate(44100)
+            
+            # Female voice: Keep default or slightly raise pitch
+            elif voice_type == 'female':
+                logger.info("👩 Using default gTTS voice (naturally female)")
+                # gTTS default is already female-sounding, so minimal change
+                pass
+            
+            # Child voice: Higher pitch
+            elif voice_type == 'child':
+                logger.info("👶 Creating child voice effect: raising pitch by 20%")
+                # Higher frame rate = higher pitched voice
+                new_frame_rate = int(sound.frame_rate * 1.20)  # 20% higher
+                sound = sound._spawn(sound.raw_data, overrides={'frame_rate': new_frame_rate})
+                sound = sound.set_frame_rate(44100)
             
             # ✅ HIGH QUALITY SETTINGS - Remove distortion/crackling
             # Normalize audio to prevent clipping and distortion
@@ -199,15 +238,90 @@ def generate_speech(text, output_path, language='en', speed=1.0, pitch=1.0, voic
             logger.info(f"Speech generated successfully with HIGH QUALITY: {output_path}")
             return True
             
-        except ImportError:
-            # If pydub not available, use simpler approach
-            logger.warning("pydub not available, using MP3 format")
-            # Keep MP3 and update filename
-            final_path = output_path.replace('.wav', '.mp3')
-            os.rename(temp_mp3, final_path)
-            # Update the expected output path
-            logger.info(f"Saved as MP3: {final_path}")
-            return True
+        except (ImportError, FileNotFoundError, RuntimeError, Exception) as pydub_err:
+            # If pydub fails (missing or any error), use librosa for pitch shifting
+            logger.warning(f"⚠️ pydub/ffmpeg issue: {type(pydub_err).__name__}: {str(pydub_err)}")
+            logger.info("🎵 Falling back to librosa for voice processing")
+            try:
+                import librosa
+                import soundfile as sf
+                import numpy as np
+                
+                logger.info(f"🎛️ Using librosa to apply {voice_type} voice effect...")
+                
+                # Load MP3 audio with high quality
+                y, sr = librosa.load(temp_mp3, sr=44100, mono=True)
+                logger.info(f"📊 Loaded audio: sample_rate={sr}, duration={len(y)/sr:.2f}s")
+                
+                # Apply voice effects based on type
+                if voice_type == 'male':
+                    logger.info("👨 Applying natural male voice effect...")
+                    # For male: slightly slower speed (0.95x) gives deeper, more natural sound
+                    # This is better than pitch shifting which can cause artifacts
+                    y_shifted = librosa.effects.time_stretch(y=y, rate=0.95)
+                    logger.info("✅ Male voice effect applied (natural time stretch)")
+                    
+                elif voice_type == 'child':
+                    logger.info("👶 Applying child voice effect...")
+                    # For child: faster speed (1.1x) gives higher, energetic sound
+                    y_shifted = librosa.effects.time_stretch(y=y, rate=1.1)
+                    logger.info("✅ Child voice effect applied")
+                    
+                else:  # female - keep default
+                    logger.info("👩 Using default (female) voice")
+                    y_shifted = y
+                
+                # Gentle normalization to prevent distortion
+                max_val = np.max(np.abs(y_shifted))
+                if max_val > 0:
+                    # Normalize to 85% to leave headroom and prevent clipping
+                    y_shifted = y_shifted / max_val * 0.85
+                    logger.info("✅ Audio normalized (gentle)")
+                
+                # Save as high-quality WAV
+                logger.info(f"💾 Saving audio to: {output_path}")
+                sf.write(output_path, y_shifted, sr, subtype='PCM_16')
+                logger.info("✅ Clean audio file saved")
+                
+                # Small delay to ensure file handle is released
+                import time
+                time.sleep(0.1)
+                
+                # Try to remove temp file with retry logic
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        if os.path.exists(temp_mp3):
+                            os.remove(temp_mp3)
+                            logger.info("🗑️ Temporary MP3 file removed")
+                        break
+                    except PermissionError:
+                        if attempt < max_retries - 1:
+                            time.sleep(0.2)
+                        else:
+                            logger.warning(f"⚠️ Could not delete temp file (will be cleaned up later): {temp_mp3}")
+                
+                logger.info(f"✅ Speech generated with librosa pitch shift ({voice_type}): {output_path}")
+                return True
+                
+            except ImportError as lie:
+                logger.warning(f"⚠️ librosa import error: {str(lie)}")
+                logger.warning("Using MP3 format without pitch changes")
+                # Keep MP3 and update filename
+                final_path = output_path.replace('.wav', '.mp3')
+                os.rename(temp_mp3, final_path)
+                logger.info(f"Saved as MP3 (no pitch modification): {final_path}")
+                return True
+            except Exception as librosa_error:
+                logger.error(f"❌ Librosa pitch shift FAILED: {str(librosa_error)}")
+                logger.error(f"   Error type: {type(librosa_error).__name__}")
+                # Fallback to MP3 without modification
+                final_path = output_path.replace('.wav', '.mp3')
+                if os.path.exists(temp_mp3):
+                    os.rename(temp_mp3, final_path)
+                logger.info(f"Saved as MP3 (fallback): {final_path}")
+                return True
+                
         except Exception as conv_error:
             logger.error(f"Audio conversion failed: {str(conv_error)}")
             # Keep the MP3 file as fallback
@@ -403,36 +517,56 @@ def synthesize_speech():
         if not text:
             return jsonify({"error": "Text is required"}), 400
         
-        # Auto-translate text to target language if not English
+        # Check if text is already in target language (skip translation)
+        # Detect if text contains Arabic/Urdu/Hindi characters
+        def contains_non_latin(text):
+            """Check if text contains non-Latin characters (Arabic, Urdu, Hindi, etc.)"""
+            import re
+            # Arabic: \u0600-\u06FF, \u0750-\u077F, \uFB50-\uFDFF, \uFE70-\uFEFF
+            # Devanagari (Hindi): \u0900-\u097F
+            pattern = re.compile(r'[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF\u0900-\u097F]')
+            return bool(pattern.search(text))
+        
+        # Auto-translate ONLY if text is in English and target is non-English
         original_text = text
-        if language != 'en':
+        should_translate = language != 'en' and not contains_non_latin(text)
+        
+        if should_translate:
             try:
-                logger.info(f"🌐 Auto-translating text to {language}...")
-                logger.info(f"Original text: '{original_text}'")
+                logger.info(f"🌐 Auto-translating English text to {language}...")
+                logger.info(f"Original English text: '{original_text}'")
                 
                 # Replace dash with space before translation (so dash is not read)
                 text_to_translate = text.replace('-', ' ')
                 
                 # Create translator for target language
-                translator = GoogleTranslator(source='auto', target=language)
+                # Handle ar-ae (Dubai Arabic) - use standard 'ar'
+                target_lang = 'ar' if language == 'ar-ae' else language
+                translator = GoogleTranslator(source='en', target=target_lang)
                 text = translator.translate(text_to_translate)
                 
-                logger.info(f"✅ Translated text: '{text}'")
+                logger.info(f"✅ Translated to {language}: '{text}'")
             except Exception as trans_err:
                 logger.warning(f"⚠️ Translation failed: {trans_err}, using original text")
                 # Continue with original text if translation fails
+        else:
+            if contains_non_latin(text):
+                logger.info(f"✅ Text already in non-Latin script ({language}), skipping translation")
+                logger.info(f"Text: '{text}'")
+            else:
+                logger.info(f"✅ Text is English for English language, no translation needed")
         
         # Ensure models are loaded (optional, only for ChatterBox)
         if TORCH_AVAILABLE and not models_loaded:
             load_models()  # Try to load but don't fail if it doesn't work
         
-        logger.info(f"=== SYNTHESIS REQUEST ===")
-        logger.info(f"Text: '{text}'")
-        logger.info(f"Language: {language}")
-        logger.info(f"Voice Type: {voice_type}")
-        logger.info(f"Speed: {speed}")
-        logger.info(f"Pitch: {pitch}")
-        logger.info(f"========================")
+        logger.info(f"========== SYNTHESIS REQUEST ==========")
+        logger.info(f"📝 Text: '{text}'")
+        logger.info(f"🌐 Language: {language}")
+        logger.info(f"🎤 Voice Type: {voice_type}")
+        logger.info(f"⚡ Speed: {speed}")
+        logger.info(f"🎵 Pitch: {pitch}")
+        logger.info(f"=======================================")
         
         output_filename = f"speech_{datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
         output_path = os.path.join(OUTPUT_DIR, output_filename)
@@ -516,25 +650,108 @@ def upload_voice_sample():
 
 @app.route('/api/tts/voices', methods=['GET'])
 def list_voices():
-    """List all available voice samples"""
+    """List all available voice samples with dynamic system voices"""
     try:
         voices = []
-        for filename in os.listdir(VOICES_DIR):
-            if filename.endswith(('.wav', '.mp3')):
-                voices.append({
-                    "id": filename,
-                    "name": filename.replace('voice_', '').replace('.wav', '').replace('.mp3', ''),
-                    "path": os.path.join(VOICES_DIR, filename)
-                })
+        
+        # Add dynamic system voices from pyttsx3
+        try:
+            engine = pyttsx3.init()
+            system_voices = engine.getProperty('voices')
+            
+            # Keep track of voice type counts for unique IDs
+            voice_type_counter = {'male': 0, 'female': 0, 'child': 0, 'default': 0}
+            
+            for voice in system_voices:
+                voice_name = voice.name
+                voice_id_lower = voice.id.lower()
+                
+                # Determine voice type based on name/id
+                if 'david' in voice_name.lower() or 'male' in voice_id_lower:
+                    voice_type = 'male'
+                    icon = '👨'
+                elif 'zira' in voice_name.lower() or 'female' in voice_id_lower:
+                    voice_type = 'female'
+                    icon = '👩'
+                elif 'child' in voice_name.lower():
+                    voice_type = 'child'
+                    icon = '👶'
+                else:
+                    voice_type = 'default'
+                    icon = '🔊'
+                
+                # Increment counter for this voice type
+                voice_type_counter[voice_type] += 1
+                
+                # ONLY add first male and first female voice (English ones)
+                if voice_type == 'male' and voice_type_counter['male'] == 1:
+                    voices.append({
+                        "id": "male",  # Simple ID for primary voices
+                        "name": f"{icon} Male Voice",
+                        "type": "male",
+                        "system_name": voice_name,
+                        "source": "pyttsx3"
+                    })
+                elif voice_type == 'female' and voice_type_counter['female'] == 1:
+                    voices.append({
+                        "id": "female",  # Simple ID for primary voices
+                        "name": f"{icon} Female Voice",
+                        "type": "female",
+                        "system_name": voice_name,
+                        "source": "pyttsx3"
+                    })
+                elif voice_type == 'child' and voice_type_counter['child'] == 1:
+                    voices.append({
+                        "id": "child",
+                        "name": f"{icon} Child Voice",
+                        "type": "child",
+                        "system_name": voice_name,
+                        "source": "pyttsx3"
+                    })
+            
+            engine.stop()
+            logger.info(f"✅ Loaded {len(voices)} primary system voices from pyttsx3")
+            
+        except Exception as voice_error:
+            logger.warning(f"⚠️ Could not load pyttsx3 voices: {voice_error}")
+            # Fallback to default voices
+            voices = [
+                {"id": "male", "name": "👨 Male Voice", "type": "male", "source": "default"},
+                {"id": "female", "name": "👩 Female Voice", "type": "female", "source": "default"},
+                {"id": "child", "name": "👶 Child Voice", "type": "child", "source": "default"}
+            ]
+        
+        # Add custom uploaded voice samples
+        try:
+            for filename in os.listdir(VOICES_DIR):
+                if filename.endswith(('.wav', '.mp3')):
+                    voices.append({
+                        "id": filename,
+                        "name": f"🎤 {filename.replace('voice_', '').replace('.wav', '').replace('.mp3', '')}",
+                        "type": "custom",
+                        "path": os.path.join(VOICES_DIR, filename),
+                        "source": "uploaded"
+                    })
+        except Exception as file_error:
+            logger.warning(f"⚠️ Could not load custom voices: {file_error}")
         
         return jsonify({
             "success": True,
-            "voices": voices
+            "data": voices,
+            "count": len(voices)
         })
         
     except Exception as e:
         logger.error(f"Error listing voices: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "data": [
+                {"id": "male", "name": "👨 Male Voice", "type": "male", "source": "fallback"},
+                {"id": "female", "name": "👩 Female Voice", "type": "female", "source": "fallback"},
+                {"id": "child", "name": "👶 Child Voice", "type": "child", "source": "fallback"}
+            ]
+        }), 200  # Return 200 with fallback data instead of error
 
 
 if __name__ == '__main__':
