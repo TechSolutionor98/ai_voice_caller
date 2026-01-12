@@ -4,4 +4,6 @@ python-dotenv
 pyttsx3
 gTTS
 pydub
+librosa
+soundfile
 deep-translator
