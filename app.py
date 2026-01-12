@@ -596,10 +596,18 @@ def synthesize_speech():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route('/api/tts/audio/<filename>', methods=['GET'])
+@app.route('/api/tts/audio/<filename>', methods=['GET', 'HEAD', 'OPTIONS'])
 def get_audio(filename):
-    """Serve generated audio files"""
+    """Serve generated audio files with CORS headers"""
     try:
+        # Handle OPTIONS preflight request
+        if request.method == 'OPTIONS':
+            response = jsonify({"status": "ok"})
+            response.headers['Access-Control-Allow-Origin'] = '*'
+            response.headers['Access-Control-Allow-Methods'] = 'GET, HEAD, OPTIONS'
+            response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+            return response, 200
+        
         audio_path = os.path.join(OUTPUT_DIR, filename)
         if not os.path.exists(audio_path):
             return jsonify({"error": "Audio file not found"}), 404
@@ -611,7 +619,13 @@ def get_audio(filename):
         elif filename.endswith('.ogg'):
             mimetype = 'audio/ogg'
         
-        return send_file(audio_path, mimetype=mimetype)
+        # Send file with CORS headers
+        response = send_file(audio_path, mimetype=mimetype)
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, HEAD, OPTIONS'
+        response.headers['Access-Control-Expose-Headers'] = 'Content-Length, Content-Type'
+        response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+        return response
         
     except Exception as e:
         logger.error(f"Error serving audio: {str(e)}")
