@@ -31,7 +31,7 @@ app = Flask(__name__)
 # Configure CORS with specific origin (prevents duplicate headers)
 CORS(app, resources={
     r"/*": {
-        "origins": ["https://qmanagement-frontend.vercel.app", "http://localhost:3000"],
+        "origins": ["https://qmanagement-frontend.vercel.app", "http://localhost:3000" , "https://qtech.techsolutionor.com"],
         "methods": ["GET", "POST", "OPTIONS"],
         "allow_headers": ["Content-Type", "Authorization"],
         "expose_headers": ["Content-Type"],
