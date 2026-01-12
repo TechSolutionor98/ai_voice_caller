@@ -28,14 +28,27 @@ except ImportError:
 
 app = Flask(__name__)
 
-# Configure CORS with specific origin (prevents duplicate headers)
+# Configure CORS - Allow all origins for audio serving, specific origins for API endpoints
 CORS(app, resources={
+    r"/api/tts/audio/*": {
+        "origins": "*",  # Allow all origins for audio files
+        "methods": ["GET", "HEAD", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Range"],
+        "expose_headers": ["Content-Length", "Content-Type", "Accept-Ranges"],
+        "supports_credentials": False
+    },
     r"/*": {
-        "origins": ["https://qmanagement-frontend.vercel.app", "http://localhost:3000" , "https://qtech.techsolutionor.com"],
+        "origins": [
+            "https://qmanagement-frontend.vercel.app",
+            "http://localhost:3000",
+            "https://qtech.techsolutionor.com",
+            "https://qmanagement-frontend-git-main-techsolutionor98.vercel.app",
+            "https://qmanagement-frontend-techsolutionor98.vercel.app"
+        ],
         "methods": ["GET", "POST", "OPTIONS"],
         "allow_headers": ["Content-Type", "Authorization"],
         "expose_headers": ["Content-Type"],
-        "supports_credentials": False
+        "supports_credentials": True
     }
 })
 
