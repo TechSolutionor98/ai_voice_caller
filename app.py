@@ -179,8 +179,8 @@ def generate_speech(text, output_path, language='en', speed=1.0, pitch=1.0, voic
         logger.info(f"Using gTTS with language code: {gtts_lang} (from input: {language})")
         logger.info(f"⚠️ NOTE: gTTS doesn't support voice_type selection - using audio manipulation for voice effect")
         
-        # Generate with gTTS
-        tts = gTTS(text=text, lang=gtts_lang, slow=(speed < 0.8))
+        # ⚡ Generate with gTTS - FAST mode (no slow parameter for speed)
+        tts = gTTS(text=text, lang=gtts_lang, slow=False)
         
         # Save to temporary MP3 first
         temp_mp3 = output_path.replace('.wav', '_temp.mp3')
@@ -217,33 +217,31 @@ def generate_speech(text, output_path, language='en', speed=1.0, pitch=1.0, voic
                 sound = sound.set_frame_rate(44100)
             
             # ✅ HIGH QUALITY SETTINGS - Remove distortion/crackling
-            # Normalize audio to prevent clipping and distortion
+            # Simple normalization to prevent clipping - FAST
             sound = sound.normalize()
             
             # Apply speed changes SMOOTHLY (if needed)
             if speed != 1.0:
-                # Use frame rate manipulation instead of speedup for better quality
+                # Use frame rate manipulation for better quality and SPEED
                 new_frame_rate = int(sound.frame_rate / speed)
                 sound = sound._spawn(sound.raw_data, overrides={'frame_rate': new_frame_rate})
-                sound = sound.set_frame_rate(44100)  # Standard high quality sample rate
+                sound = sound.set_frame_rate(44100)  # Standard sample rate
             
-            # Apply pitch changes SMOOTHLY (if needed)
-            if pitch != 1.0:
-                # Octaves manipulation for cleaner pitch shifting
-                octaves = math.log2(pitch)
-                new_sample_rate = int(sound.frame_rate * (2 ** octaves))
+            # Apply pitch changes SMOOTHLY (if needed)  
+            if pitch != 1.0 and abs(pitch - 1.0) > 0.05:  # Only if significant change
+                new_sample_rate = int(sound.frame_rate * pitch)
                 sound = sound._spawn(sound.raw_data, overrides={'frame_rate': new_sample_rate})
                 sound = sound.set_frame_rate(44100)
             
-            # Export with HIGH QUALITY settings
+            # Export with GOOD QUALITY settings (optimized for speed)
             sound.export(
                 output_path, 
                 format="wav",
                 parameters=[
-                    "-ar", "44100",      # Sample rate: 44.1kHz (CD quality)
+                    "-ar", "22050",      # ⚡ Reduced to 22.05kHz for faster processing (still good quality)
                     "-ac", "1",          # Mono channel
-                    "-b:a", "192k",      # Bitrate: 192kbps (high quality)
-                    "-acodec", "pcm_s16le"  # PCM 16-bit (uncompressed, no artifacts)
+                    "-b:a", "128k",      # ⚡ Reduced bitrate for faster encoding
+                    "-acodec", "pcm_s16le"  # PCM 16-bit
                 ]
             )
             os.remove(temp_mp3)
