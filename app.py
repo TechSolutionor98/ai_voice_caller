@@ -11,7 +11,13 @@ import asyncio
 import threading
 import logging
 from datetime import datetime
-import edge_tts
+
+# Try to import edge-tts
+try:
+    import edge_tts
+    EDGE_TTS_AVAILABLE = True
+except ImportError:
+    EDGE_TTS_AVAILABLE = False
 
 # Fallback imports
 try:
@@ -388,6 +394,11 @@ def generate_speech(text, output_path, language='en', speed=1.0, pitch=1.0, voic
     
     logger.info(f"🎙️ generate_speech called: lang={language}, voice={voice_type}, text='{text[:50]}...'")
     
+    if not EDGE_TTS_AVAILABLE:
+        logger.warning("⚠️ edge-tts module is not installed! Skipping Edge-TTS generation.")
+        # Force jump to exception handling / fallback by raising a custom error
+        raise ImportError("edge-tts module not installed")
+    
     # ═══════════════════════════════════════════════════
     # PRIMARY: Edge-TTS (best quality, native multi-language, SSML pitch for child voice)
     # ═══════════════════════════════════════════════════
@@ -472,7 +483,8 @@ def health_check():
     """Health check endpoint"""
     return jsonify({
         "status": "healthy",
-        "tts_engine": "edge-tts",
+        "tts_engine": "edge-tts" if EDGE_TTS_AVAILABLE else "gTTS (fallback)",
+        "edge_tts_installed": EDGE_TTS_AVAILABLE,
         "fallback": "gTTS" if GTTS_AVAILABLE else "none",
         "timestamp": datetime.now().isoformat()
     })
@@ -662,10 +674,12 @@ if __name__ == '__main__':
     logger.info("═══════════════════════════════════════════════")
     logger.info("🚀 Starting Edge-TTS Voice Calling Service")
     logger.info("═══════════════════════════════════════════════")
-    logger.info(f"  Primary TTS:  edge-tts (Microsoft Edge Neural TTS)")
+    logger.info(f"  Primary TTS:  edge-tts {'(available)' if EDGE_TTS_AVAILABLE else '(NOT installed - running in gTTS fallback mode)'}")
+    if not EDGE_TTS_AVAILABLE:
+        logger.warning("  ⚠️ Please run 'pip install edge-tts' to enable premium neural voices!")
     logger.info(f"  Fallback TTS: gTTS {'(available)' if GTTS_AVAILABLE else '(NOT available)'}")
     logger.info(f"  Audio tools:  pydub {'(available)' if PYDUB_AVAILABLE else '(NOT available)'}")
-    logger.info(f"  Default voice: child boy (pitch +35%)")
+    logger.info(f"  Default voice: child boy")
     logger.info(f"  Translation:  DISABLED (frontend sends translated text)")
     logger.info("═══════════════════════════════════════════════")
     
