@@ -1,30 +1,41 @@
 """
-ChatterBox Voice Cloning TTS Service
-Flask-based service for voice cloning and text-to-speech generation
+Edge-TTS Voice Calling Service
+Flask-based service for high-quality multi-language TTS with child boy voice support.
+Uses Microsoft Edge TTS as primary engine with gTTS fallback.
 """
 
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import os
-import tempfile
+import asyncio
+import threading
 import logging
 from datetime import datetime
-import pyttsx3
-from gtts import gTTS
+import edge_tts
+
+# Fallback imports
+try:
+    from gtts import gTTS
+    GTTS_AVAILABLE = True
+except ImportError:
+    GTTS_AVAILABLE = False
+
+try:
+    import pyttsx3
+    PYTTSX3_AVAILABLE = True
+except ImportError:
+    PYTTSX3_AVAILABLE = False
+
+# Optional imports for audio processing (fallback pitch shifting)
+try:
+    from pydub import AudioSegment
+    PYDUB_AVAILABLE = True
+except ImportError:
+    PYDUB_AVAILABLE = False
+
 import wave
 import struct
 import math
-from deep_translator import GoogleTranslator
-
-# Optional imports for ChatterBox model
-try:
-    import torch
-    from huggingface_hub import hf_hub_download
-    TORCH_AVAILABLE = True
-except ImportError:
-    TORCH_AVAILABLE = False
-    logger = logging.getLogger(__name__)
-    logger.info("torch not available, using gTTS and pyttsx3 only")
 
 app = Flask(__name__)
 
@@ -56,12 +67,6 @@ CORS(app, resources={
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Global variables for models
-models_loaded = False
-s3gen_model = None
-t3_cfg_model = None
-ve_model = None
-
 # Directories
 MODELS_DIR = "./models"
 VOICES_DIR = "./voice_samples"
@@ -72,101 +77,232 @@ os.makedirs(MODELS_DIR, exist_ok=True)
 os.makedirs(VOICES_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+# ============================================================================
+# EDGE-TTS VOICE CONFIGURATION
+# ============================================================================
+# Each language maps to specific voice settings for different voice types.
+# For "child" voice: we use a male voice with SSML pitch raised to sound young.
+# For "male" voice: standard adult male voice.
+# For "female" voice: standard adult female voice.
+# ============================================================================
 
-def generate_speech(text, output_path, language='en', speed=1.0, pitch=1.0, voice_type='default'):
+EDGE_TTS_VOICES = {
+    # English
+    'en': {
+        'child': {'voice': 'en-US-AndrewNeural', 'pitch': '+25Hz', 'rate': '+5%'},
+        'male': {'voice': 'en-US-GuyNeural', 'pitch': '+0Hz', 'rate': '+0%'},
+        'female': {'voice': 'en-US-JennyNeural', 'pitch': '+0Hz', 'rate': '+0%'},
+        'default': {'voice': 'en-US-GuyNeural', 'pitch': '+0Hz', 'rate': '+0%'},
+    },
+    # Arabic (UAE / Dubai)
+    'ar-ae': {
+        'child': {'voice': 'ar-AE-HamdanNeural', 'pitch': '+60Hz', 'rate': '+5%'},
+        'male': {'voice': 'ar-AE-HamdanNeural', 'pitch': '+0Hz', 'rate': '+0%'},
+        'female': {'voice': 'ar-AE-FatimaNeural', 'pitch': '+0Hz', 'rate': '+0%'},
+        'default': {'voice': 'ar-AE-HamdanNeural', 'pitch': '+0Hz', 'rate': '+0%'},
+    },
+    # Arabic (Standard)
+    'ar': {
+        'child': {'voice': 'ar-SA-HamedNeural', 'pitch': '+60Hz', 'rate': '+5%'},
+        'male': {'voice': 'ar-SA-HamedNeural', 'pitch': '+0Hz', 'rate': '+0%'},
+        'female': {'voice': 'ar-SA-ZariyahNeural', 'pitch': '+0Hz', 'rate': '+0%'},
+        'default': {'voice': 'ar-SA-HamedNeural', 'pitch': '+0Hz', 'rate': '+0%'},
+    },
+    # Urdu
+    'ur': {
+        'child': {'voice': 'ur-PK-AsadNeural', 'pitch': '+60Hz', 'rate': '+5%'},
+        'male': {'voice': 'ur-PK-AsadNeural', 'pitch': '+0Hz', 'rate': '+0%'},
+        'female': {'voice': 'ur-PK-UzmaNeural', 'pitch': '+0Hz', 'rate': '+0%'},
+        'default': {'voice': 'ur-PK-AsadNeural', 'pitch': '+0Hz', 'rate': '+0%'},
+    },
+    # Hindi
+    'hi': {
+        'child': {'voice': 'hi-IN-MadhurNeural', 'pitch': '+60Hz', 'rate': '+5%'},
+        'male': {'voice': 'hi-IN-MadhurNeural', 'pitch': '+0Hz', 'rate': '+0%'},
+        'female': {'voice': 'hi-IN-SwaraNeural', 'pitch': '+0Hz', 'rate': '+0%'},
+        'default': {'voice': 'hi-IN-MadhurNeural', 'pitch': '+0Hz', 'rate': '+0%'},
+    },
+    # Spanish
+    'es': {
+        'child': {'voice': 'es-ES-AlvaroNeural', 'pitch': '+60Hz', 'rate': '+5%'},
+        'male': {'voice': 'es-ES-AlvaroNeural', 'pitch': '+0Hz', 'rate': '+0%'},
+        'female': {'voice': 'es-ES-ElviraNeural', 'pitch': '+0Hz', 'rate': '+0%'},
+        'default': {'voice': 'es-ES-AlvaroNeural', 'pitch': '+0Hz', 'rate': '+0%'},
+    },
+    # French
+    'fr': {
+        'child': {'voice': 'fr-FR-HenriNeural', 'pitch': '+60Hz', 'rate': '+5%'},
+        'male': {'voice': 'fr-FR-HenriNeural', 'pitch': '+0Hz', 'rate': '+0%'},
+        'female': {'voice': 'fr-FR-DeniseNeural', 'pitch': '+0Hz', 'rate': '+0%'},
+        'default': {'voice': 'fr-FR-HenriNeural', 'pitch': '+0Hz', 'rate': '+0%'},
+    },
+    # German
+    'de': {
+        'child': {'voice': 'de-DE-ConradNeural', 'pitch': '+60Hz', 'rate': '+5%'},
+        'male': {'voice': 'de-DE-ConradNeural', 'pitch': '+0Hz', 'rate': '+0%'},
+        'female': {'voice': 'de-DE-KatjaNeural', 'pitch': '+0Hz', 'rate': '+0%'},
+        'default': {'voice': 'de-DE-ConradNeural', 'pitch': '+0Hz', 'rate': '+0%'},
+    },
+    # Chinese
+    'zh': {
+        'child': {'voice': 'zh-CN-YunxiNeural', 'pitch': '+60Hz', 'rate': '+5%'},
+        'male': {'voice': 'zh-CN-YunxiNeural', 'pitch': '+0Hz', 'rate': '+0%'},
+        'female': {'voice': 'zh-CN-XiaoxiaoNeural', 'pitch': '+0Hz', 'rate': '+0%'},
+        'default': {'voice': 'zh-CN-YunxiNeural', 'pitch': '+0Hz', 'rate': '+0%'},
+    },
+    # Japanese
+    'ja': {
+        'child': {'voice': 'ja-JP-KeitaNeural', 'pitch': '+60Hz', 'rate': '+5%'},
+        'male': {'voice': 'ja-JP-KeitaNeural', 'pitch': '+0Hz', 'rate': '+0%'},
+        'female': {'voice': 'ja-JP-NanamiNeural', 'pitch': '+0Hz', 'rate': '+0%'},
+        'default': {'voice': 'ja-JP-KeitaNeural', 'pitch': '+0Hz', 'rate': '+0%'},
+    },
+}
+
+
+def get_voice_config(language, voice_type):
     """
-    Generate speech using available TTS engines
-    Falls back through multiple engines for reliability
-    voice_type: 'male', 'female', 'child', or 'default'
+    Get the edge-tts voice configuration for a given language and voice type.
+    Strictly returns the correct voice for the selected language — no mixing.
     """
-    # ✅ DYNAMIC: Only convert 'default' to 'male' for English, but respect user's choice
-    if voice_type == 'default' or not voice_type:
-        # Only for English, default to male (gTTS female is default for other languages)
-        voice_type = 'male' if language == 'en' else 'default'
-        logger.info(f"🔄 Voice type was empty/default, using: {voice_type} for {language}")
+    # Normalize voice type
+    if not voice_type or voice_type == 'default':
+        voice_type = 'child'  # Default to child boy voice as per requirement
     
-    # ✅ Use pyttsx3 for English when SPECIFIC voice type is requested (male/female/child)
-    # For non-English languages, use gTTS because Windows pyttsx3 only has English voices
-    use_pyttsx3_first = (voice_type in ['male', 'female', 'child'] and language == 'en')
+    voice_type = voice_type.lower().strip()
+    if voice_type not in ['male', 'female', 'child']:
+        voice_type = 'child'
     
-    # Try pyttsx3 first for English with specific voice type
-    if use_pyttsx3_first:
-        try:
-            logger.info(f"🎤 Using pyttsx3 for voice type: {voice_type} (language: {language})")
-            engine = pyttsx3.init()
-            
-            # Set properties
-            rate = engine.getProperty('rate')
-            engine.setProperty('rate', int(rate * speed))
-            
-            volume = engine.getProperty('volume')
-            engine.setProperty('volume', volume)
-            
-            # Try to find matching voice by type and language
-            voices = engine.getProperty('voices')
-            voice_keywords = {
-                'male': ['david', 'mark', 'male', 'man', 'james', 'george'],
-                'female': ['zira', 'hazel', 'female', 'woman', 'susan', 'mary', 'linda'],
-                'child': ['child', 'kid', 'young']
-            }
-            
-            keywords = voice_keywords.get(voice_type.lower(), [])
-            selected = False
-            
-            logger.info(f"🔍 Searching for {voice_type} voice in {len(voices)} available voices...")
-            
-            # Try to match language + voice type
-            for voice in voices:
-                voice_name = voice.name.lower()
-                voice_langs = getattr(voice, 'languages', [])
-                
-                # Check if voice matches language and type
-                lang_match = any(language.split('-')[0] in str(lang).lower() for lang in voice_langs) if voice_langs else True
-                type_match = any(keyword in voice_name for keyword in keywords) if keywords else False
-                
-                if lang_match and type_match:
-                    engine.setProperty('voice', voice.id)
-                    logger.info(f"✅ Selected PERFECT match: {voice.name} (lang: {language}, type: {voice_type})")
-                    selected = True
-                    break
-            
-            # Fallback: just match type (any language)
-            if not selected and keywords:
-                for voice in voices:
-                    voice_name = voice.name.lower()
-                    if any(keyword in voice_name for keyword in keywords):
-                        engine.setProperty('voice', voice.id)
-                        logger.info(f"✅ Selected voice by TYPE: {voice.name} (type: {voice_type})")
-                        selected = True
-                        break
-            
-            # If no specific voice found, use default but log warning
-            if not selected:
-                logger.warning(f"⚠️ Could not find {voice_type} voice, using system default")
-            
-            # Adjust pitch by modifying rate
-            if pitch != 1.0:
-                current_rate = engine.getProperty('rate')
-                engine.setProperty('rate', int(current_rate * pitch))
-            
-            # Save to file
-            engine.save_to_file(text, output_path)
-            engine.runAndWait()
-            
-            logger.info(f"✅ Speech generated with pyttsx3 ({voice_type}): {output_path}")
-            return True
-            
-        except Exception as e:
-            logger.warning(f"⚠️ pyttsx3 failed: {str(e)}, falling back to gTTS")
+    # Normalize language code
+    lang = language.lower().strip() if language else 'en'
     
-    # Default: Use gTTS for reliability and language support
+    # Direct lookup
+    if lang in EDGE_TTS_VOICES:
+        config = EDGE_TTS_VOICES[lang].get(voice_type, EDGE_TTS_VOICES[lang]['default'])
+        logger.info(f"✅ Voice config for {lang}/{voice_type}: {config['voice']} (pitch: {config['pitch']})")
+        return config
+    
+    # Try base language (e.g., 'ar-ae' → 'ar')
+    base_lang = lang.split('-')[0]
+    if base_lang in EDGE_TTS_VOICES:
+        config = EDGE_TTS_VOICES[base_lang].get(voice_type, EDGE_TTS_VOICES[base_lang]['default'])
+        logger.info(f"✅ Voice config for {lang} (base: {base_lang})/{voice_type}: {config['voice']} (pitch: {config['pitch']})")
+        return config
+    
+    # Fallback to English
+    logger.warning(f"⚠️ No voice config for language '{lang}', falling back to English")
+    config = EDGE_TTS_VOICES['en'].get(voice_type, EDGE_TTS_VOICES['en']['default'])
+    return config
+
+
+async def generate_speech_edge_tts(text, output_path, language='en', speed=1.0, pitch=1.0, voice_type='child'):
+    """
+    Generate speech using Microsoft Edge TTS.
+    This is the PRIMARY TTS engine — high quality, multi-language, child voice support.
+    
+    The text is used AS-IS (no translation). Frontend sends already-translated text.
+    """
     try:
-        # Method 1: Try gTTS (Google Text-to-Speech) - Simple and reliable
+        # Get voice configuration for this language + voice type
+        voice_config = get_voice_config(language, voice_type)
+        voice_name = voice_config['voice']
+        ssml_pitch = voice_config['pitch']
+        ssml_rate = voice_config['rate']
+        
+        # Apply user speed setting on top of voice config rate
+        # Convert speed multiplier to edge-tts rate format
+        if speed and speed != 1.0:
+            speed_percent = int((speed - 1.0) * 100)
+            ssml_rate = f"{'+' if speed_percent >= 0 else ''}{speed_percent}%"
+        
+        logger.info(f"═══════════════════════════════════════")
+        logger.info(f"🎙️ EDGE-TTS GENERATION")
+        logger.info(f"═══════════════════════════════════════")
+        logger.info(f"  📝 Text: '{text}'")
+        logger.info(f"  🌐 Language: {language}")
+        logger.info(f"  🎤 Voice Type: {voice_type}")
+        logger.info(f"  🔊 Voice Name: {voice_name}")
+        logger.info(f"  🎵 SSML Pitch: {ssml_pitch}")
+        logger.info(f"  ⚡ SSML Rate: {ssml_rate}")
+        logger.info(f"═══════════════════════════════════════")
+        
+        # Generate speech with edge-tts
+        communicate = edge_tts.Communicate(
+            text=text,
+            voice=voice_name,
+            pitch=ssml_pitch,
+            rate=ssml_rate
+        )
+        
+        # Save as MP3 first (edge-tts outputs MP3)
+        temp_mp3 = output_path.replace('.wav', '.mp3')
+        await communicate.save(temp_mp3)
+        
+        logger.info(f"✅ Edge-TTS audio saved: {temp_mp3}")
+        
+        # Convert MP3 to WAV for consistent output format
+        if PYDUB_AVAILABLE:
+            try:
+                sound = AudioSegment.from_mp3(temp_mp3)
+                
+                # Normalize audio to prevent clipping
+                sound = sound.normalize()
+                
+                # Export as high-quality WAV
+                sound.export(
+                    output_path,
+                    format="wav",
+                    parameters=[
+                        "-ar", "22050",
+                        "-ac", "1",
+                        "-acodec", "pcm_s16le"
+                    ]
+                )
+                
+                # Clean up temp MP3
+                if os.path.exists(temp_mp3):
+                    os.remove(temp_mp3)
+                
+                logger.info(f"✅ Converted to WAV: {output_path}")
+                return True
+                
+            except Exception as conv_err:
+                logger.warning(f"⚠️ WAV conversion failed: {conv_err}, using MP3 directly")
+                # Keep as MP3 if conversion fails
+                final_path = output_path.replace('.wav', '.mp3')
+                if temp_mp3 != final_path:
+                    os.rename(temp_mp3, final_path)
+                return True
+        else:
+            # No pydub, keep as MP3
+            logger.info("ℹ️ pydub not available, keeping MP3 format")
+            final_path = output_path.replace('.wav', '.mp3')
+            if temp_mp3 != final_path and os.path.exists(temp_mp3):
+                os.rename(temp_mp3, final_path)
+            return True
+        
+    except Exception as e:
+        logger.error(f"❌ Edge-TTS generation failed: {str(e)}")
+        logger.error(f"   Error type: {type(e).__name__}")
+        return False
+
+
+def generate_speech_gtts_fallback(text, output_path, language='en', speed=1.0, voice_type='child'):
+    """
+    Fallback TTS using gTTS when edge-tts is unavailable.
+    Applies pitch shifting for child voice effect using pydub.
+    """
+    if not GTTS_AVAILABLE:
+        logger.error("❌ gTTS not available for fallback")
+        return False
+    
+    try:
+        # Map language codes for gTTS
         lang_map = {
             'en': 'en',
             'ur': 'ur',
             'ar': 'ar',
-            'ar-ae': 'ar',  # Dubai Arabic uses standard Arabic TTS
+            'ar-ae': 'ar',
             'es': 'es',
             'hi': 'hi',
             'fr': 'fr',
@@ -176,212 +312,137 @@ def generate_speech(text, output_path, language='en', speed=1.0, pitch=1.0, voic
         }
         
         gtts_lang = lang_map.get(language, 'en')
-        logger.info(f"Using gTTS with language code: {gtts_lang} (from input: {language})")
-        logger.info(f"⚠️ NOTE: gTTS doesn't support voice_type selection - using audio manipulation for voice effect")
+        logger.info(f"🔄 gTTS fallback: language={gtts_lang}, voice_type={voice_type}")
         
-        # ⚡ Generate with gTTS - FAST mode (no slow parameter for speed)
+        # Generate with gTTS
         tts = gTTS(text=text, lang=gtts_lang, slow=False)
         
-        # Save to temporary MP3 first
-        temp_mp3 = output_path.replace('.wav', '_temp.mp3')
+        temp_mp3 = output_path.replace('.wav', '_gtts_temp.mp3')
         tts.save(temp_mp3)
         
-        # Convert MP3 to WAV and apply voice effects
-        try:
-            from pydub import AudioSegment
-            sound = AudioSegment.from_mp3(temp_mp3)
-            
-            # ✅ APPLY VOICE TYPE EFFECT using audio manipulation
-            logger.info(f"🎛️ Applying {voice_type} voice effect to gTTS audio...")
-            
-            # Male voice: Lower pitch (slower playback rate) 
-            if voice_type == 'male':
-                logger.info("👨 Creating male voice effect: lowering pitch by 15%")
-                # Lower frame rate = deeper voice
-                new_frame_rate = int(sound.frame_rate * 0.85)  # 15% lower
-                sound = sound._spawn(sound.raw_data, overrides={'frame_rate': new_frame_rate})
-                sound = sound.set_frame_rate(44100)
-            
-            # Female voice: Keep default or slightly raise pitch
-            elif voice_type == 'female':
-                logger.info("👩 Using default gTTS voice (naturally female)")
-                # gTTS default is already female-sounding, so minimal change
-                pass
-            
-            # Child voice: Higher pitch
-            elif voice_type == 'child':
-                logger.info("👶 Creating child voice effect: raising pitch by 20%")
-                # Higher frame rate = higher pitched voice
-                new_frame_rate = int(sound.frame_rate * 1.20)  # 20% higher
-                sound = sound._spawn(sound.raw_data, overrides={'frame_rate': new_frame_rate})
-                sound = sound.set_frame_rate(44100)
-            
-            # ✅ HIGH QUALITY SETTINGS - Remove distortion/crackling
-            # Simple normalization to prevent clipping - FAST
-            sound = sound.normalize()
-            
-            # Apply speed changes SMOOTHLY (if needed)
-            if speed != 1.0:
-                # Use frame rate manipulation for better quality and SPEED
-                new_frame_rate = int(sound.frame_rate / speed)
-                sound = sound._spawn(sound.raw_data, overrides={'frame_rate': new_frame_rate})
-                sound = sound.set_frame_rate(44100)  # Standard sample rate
-            
-            # Apply pitch changes SMOOTHLY (if needed)  
-            if pitch != 1.0 and abs(pitch - 1.0) > 0.05:  # Only if significant change
-                new_sample_rate = int(sound.frame_rate * pitch)
-                sound = sound._spawn(sound.raw_data, overrides={'frame_rate': new_sample_rate})
-                sound = sound.set_frame_rate(44100)
-            
-            # Export with GOOD QUALITY settings (optimized for speed)
-            sound.export(
-                output_path, 
-                format="wav",
-                parameters=[
-                    "-ar", "22050",      # ⚡ Reduced to 22.05kHz for faster processing (still good quality)
-                    "-ac", "1",          # Mono channel
-                    "-b:a", "128k",      # ⚡ Reduced bitrate for faster encoding
-                    "-acodec", "pcm_s16le"  # PCM 16-bit
-                ]
-            )
-            os.remove(temp_mp3)
-            
-            logger.info(f"Speech generated successfully with HIGH QUALITY: {output_path}")
-            return True
-            
-        except (ImportError, FileNotFoundError, RuntimeError, Exception) as pydub_err:
-            # If pydub fails (missing or any error), use librosa for pitch shifting
-            logger.warning(f"⚠️ pydub/ffmpeg issue: {type(pydub_err).__name__}: {str(pydub_err)}")
-            logger.info("🎵 Falling back to librosa for voice processing")
+        # Apply voice effects with pydub if available
+        if PYDUB_AVAILABLE:
             try:
-                import librosa
-                import soundfile as sf
-                import numpy as np
+                sound = AudioSegment.from_mp3(temp_mp3)
                 
-                logger.info(f"🎛️ Using librosa to apply {voice_type} voice effect...")
+                # Apply child voice effect: raise pitch by 25%
+                if voice_type == 'child':
+                    logger.info("👶 Applying child voice pitch shift (gTTS fallback)")
+                    new_frame_rate = int(sound.frame_rate * 1.25)
+                    sound = sound._spawn(sound.raw_data, overrides={'frame_rate': new_frame_rate})
+                    sound = sound.set_frame_rate(44100)
+                elif voice_type == 'male':
+                    logger.info("👨 Applying male voice pitch shift")
+                    new_frame_rate = int(sound.frame_rate * 0.85)
+                    sound = sound._spawn(sound.raw_data, overrides={'frame_rate': new_frame_rate})
+                    sound = sound.set_frame_rate(44100)
                 
-                # Load MP3 audio with high quality
-                y, sr = librosa.load(temp_mp3, sr=44100, mono=True)
-                logger.info(f"📊 Loaded audio: sample_rate={sr}, duration={len(y)/sr:.2f}s")
+                # Apply speed
+                if speed and speed != 1.0:
+                    new_frame_rate = int(sound.frame_rate / speed)
+                    sound = sound._spawn(sound.raw_data, overrides={'frame_rate': new_frame_rate})
+                    sound = sound.set_frame_rate(44100)
                 
-                # Apply voice effects based on type
-                if voice_type == 'male':
-                    logger.info("👨 Applying natural male voice effect...")
-                    # For male: slightly slower speed (0.95x) gives deeper, more natural sound
-                    # This is better than pitch shifting which can cause artifacts
-                    y_shifted = librosa.effects.time_stretch(y=y, rate=0.95)
-                    logger.info("✅ Male voice effect applied (natural time stretch)")
-                    
-                elif voice_type == 'child':
-                    logger.info("👶 Applying child voice effect...")
-                    # For child: faster speed (1.1x) gives higher, energetic sound
-                    y_shifted = librosa.effects.time_stretch(y=y, rate=1.1)
-                    logger.info("✅ Child voice effect applied")
-                    
-                else:  # female - keep default
-                    logger.info("👩 Using default (female) voice")
-                    y_shifted = y
+                # Normalize
+                sound = sound.normalize()
                 
-                # Gentle normalization to prevent distortion
-                max_val = np.max(np.abs(y_shifted))
-                if max_val > 0:
-                    # Normalize to 85% to leave headroom and prevent clipping
-                    y_shifted = y_shifted / max_val * 0.85
-                    logger.info("✅ Audio normalized (gentle)")
+                # Export WAV
+                sound.export(
+                    output_path,
+                    format="wav",
+                    parameters=["-ar", "22050", "-ac", "1", "-acodec", "pcm_s16le"]
+                )
                 
-                # Save as high-quality WAV
-                logger.info(f"💾 Saving audio to: {output_path}")
-                sf.write(output_path, y_shifted, sr, subtype='PCM_16')
-                logger.info("✅ Clean audio file saved")
-                
-                # Small delay to ensure file handle is released
-                import time
-                time.sleep(0.1)
-                
-                # Try to remove temp file with retry logic
-                max_retries = 3
-                for attempt in range(max_retries):
-                    try:
-                        if os.path.exists(temp_mp3):
-                            os.remove(temp_mp3)
-                            logger.info("🗑️ Temporary MP3 file removed")
-                        break
-                    except PermissionError:
-                        if attempt < max_retries - 1:
-                            time.sleep(0.2)
-                        else:
-                            logger.warning(f"⚠️ Could not delete temp file (will be cleaned up later): {temp_mp3}")
-                
-                logger.info(f"✅ Speech generated with librosa pitch shift ({voice_type}): {output_path}")
+                os.remove(temp_mp3)
+                logger.info(f"✅ gTTS fallback audio generated: {output_path}")
                 return True
                 
-            except ImportError as lie:
-                logger.warning(f"⚠️ librosa import error: {str(lie)}")
-                logger.warning("Using MP3 format without pitch changes")
-                # Keep MP3 and update filename
+            except Exception as pydub_err:
+                logger.warning(f"⚠️ pydub processing failed in fallback: {pydub_err}")
+                # Keep MP3 without processing
                 final_path = output_path.replace('.wav', '.mp3')
                 os.rename(temp_mp3, final_path)
-                logger.info(f"Saved as MP3 (no pitch modification): {final_path}")
                 return True
-            except Exception as librosa_error:
-                logger.error(f"❌ Librosa pitch shift FAILED: {str(librosa_error)}")
-                logger.error(f"   Error type: {type(librosa_error).__name__}")
-                # Fallback to MP3 without modification
-                final_path = output_path.replace('.wav', '.mp3')
-                if os.path.exists(temp_mp3):
-                    os.rename(temp_mp3, final_path)
-                logger.info(f"Saved as MP3 (fallback): {final_path}")
-                return True
-                
-        except Exception as conv_error:
-            logger.error(f"Audio conversion failed: {str(conv_error)}")
-            # Keep the MP3 file as fallback
+        else:
+            # No pydub, keep MP3
             final_path = output_path.replace('.wav', '.mp3')
-            if os.path.exists(temp_mp3):
-                os.rename(temp_mp3, final_path)
+            os.rename(temp_mp3, final_path)
             return True
             
     except Exception as e:
-        logger.error(f"gTTS failed: {str(e)}")
-        
-        # Method 2: Fallback to pyttsx3 (offline TTS)
-        try:
-            logger.info("Falling back to pyttsx3...")
-            engine = pyttsx3.init()
-            
-            # Set properties
-            rate = engine.getProperty('rate')
-            engine.setProperty('rate', rate * speed)
-            
-            volume = engine.getProperty('volume')
-            engine.setProperty('volume', volume)
-            
-            # Set voice based on language preference
-            voices = engine.getProperty('voices')
-            for voice in voices:
-                if language == 'en' and 'english' in voice.name.lower():
-                    engine.setProperty('voice', voice.id)
-                    break
-                elif language in voice.languages:
-                    engine.setProperty('voice', voice.id)
-                    break
-            
-            # Save to file
-            engine.save_to_file(text, output_path)
-            engine.runAndWait()
-            
-            logger.info(f"Speech generated with pyttsx3: {output_path}")
-            return True
-            
-        except Exception as e2:
-            logger.error(f"pyttsx3 also failed: {str(e2)}")
-            
-            # Method 3: Create a simple beep tone as last resort
-            logger.warning("All TTS engines failed, creating placeholder audio")
-            create_placeholder_audio(output_path, duration=2)
-            return True
+        logger.error(f"❌ gTTS fallback failed: {str(e)}")
+        return False
+
+
+def generate_speech(text, output_path, language='en', speed=1.0, pitch=1.0, voice_type='child'):
+    """
+    Generate speech using available TTS engines.
+    Priority: edge-tts (primary) → gTTS (fallback) → placeholder
     
-    return False
+    IMPORTANT: Text is used AS-IS. No translation is performed here.
+    The frontend sends already-translated text for each language.
+    """
+    # Normalize voice type — default to 'child' as per requirement
+    if not voice_type or voice_type == 'default':
+        voice_type = 'child'
+    
+    logger.info(f"🎙️ generate_speech called: lang={language}, voice={voice_type}, text='{text[:50]}...'")
+    
+    # ═══════════════════════════════════════════════════
+    # PRIMARY: Edge-TTS (best quality, native multi-language, SSML pitch for child voice)
+    # ═══════════════════════════════════════════════════
+    try:
+        # Run async edge-tts in a dedicated thread to avoid event loop conflicts
+        edge_result = [False]
+        edge_error = [None]
+        
+        def run_edge_tts():
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    edge_result[0] = loop.run_until_complete(
+                        generate_speech_edge_tts(text, output_path, language, speed, pitch, voice_type)
+                    )
+                finally:
+                    loop.close()
+            except Exception as e:
+                edge_error[0] = e
+        
+        thread = threading.Thread(target=run_edge_tts)
+        thread.start()
+        thread.join(timeout=30)  # 30 second timeout
+        
+        if edge_error[0]:
+            raise edge_error[0]
+        
+        if edge_result[0]:
+            logger.info(f"✅ Speech generated successfully with Edge-TTS")
+            return True
+        else:
+            logger.warning("⚠️ Edge-TTS returned False, trying fallback...")
+            
+    except Exception as edge_err:
+        logger.error(f"❌ Edge-TTS exception: {str(edge_err)}")
+        logger.info("🔄 Falling back to gTTS...")
+    
+    # ═══════════════════════════════════════════════════
+    # FALLBACK: gTTS + pydub pitch shifting
+    # ═══════════════════════════════════════════════════
+    try:
+        success = generate_speech_gtts_fallback(text, output_path, language, speed, voice_type)
+        if success:
+            logger.info(f"✅ Speech generated with gTTS fallback")
+            return True
+    except Exception as gtts_err:
+        logger.error(f"❌ gTTS fallback exception: {str(gtts_err)}")
+    
+    # ═══════════════════════════════════════════════════
+    # LAST RESORT: Placeholder audio
+    # ═══════════════════════════════════════════════════
+    logger.warning("⚠️ All TTS engines failed, creating placeholder audio")
+    create_placeholder_audio(output_path, duration=2)
+    return True
 
 
 def create_placeholder_audio(filepath, duration=2, frequency=440):
@@ -406,112 +467,31 @@ def create_placeholder_audio(filepath, duration=2, frequency=440):
         return False
 
 
-def download_models():
-    """Download ChatterBox models from Hugging Face"""
-    global models_loaded
-    
-    if not TORCH_AVAILABLE:
-        logger.warning("torch not available, skipping model download")
-        return False
-    
-    if models_loaded:
-        return True
-    
-    try:
-        logger.info("Downloading ChatterBox models from Hugging Face...")
-        logger.info(f"Models will be saved to: {MODELS_DIR}")
-        
-        # Download model files
-        model_files = ["s3gen.pt", "t3_cfg.pt", "ve.pt", "tokenizer.json"]
-        
-        for filename in model_files:
-            model_path = os.path.join(MODELS_DIR, filename)
-            if not os.path.exists(model_path):
-                logger.info(f"Downloading {filename}...")
-                downloaded_path = hf_hub_download(
-                    repo_id="ramimu/chatterbox-voice-cloning-model",
-                    filename=filename,
-                    local_dir=MODELS_DIR,
-                    local_dir_use_symlinks=False
-                )
-                logger.info(f"Downloaded {filename} to {downloaded_path}")
-        
-        # Verify all files exist
-        all_exist = all(os.path.exists(os.path.join(MODELS_DIR, f)) for f in model_files)
-        if all_exist:
-            models_loaded = True
-            logger.info("All models downloaded successfully!")
-            logger.info(f"Models location: {os.path.abspath(MODELS_DIR)}")
-        else:
-            logger.error("Some models failed to download")
-            return False
-        
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error downloading models: {str(e)}")
-        return False
-
-
-def load_models():
-    """Load the ChatterBox models into memory"""
-    global s3gen_model, t3_cfg_model, ve_model
-    
-    if not TORCH_AVAILABLE:
-        logger.warning("torch not available, skipping model loading")
-        return False
-    
-    try:
-        if not models_loaded:
-            download_models()
-        
-        logger.info("Loading models into memory...")
-        
-        # Load models
-        s3gen_path = os.path.join(MODELS_DIR, "s3gen.pt")
-        t3_cfg_path = os.path.join(MODELS_DIR, "t3_cfg.pt")
-        ve_path = os.path.join(MODELS_DIR, "ve.pt")
-        
-        if torch.cuda.is_available():
-            device = "cuda"
-            logger.info("Using GPU for inference")
-        else:
-            device = "cpu"
-            logger.info("Using CPU for inference")
-        
-        s3gen_model = torch.load(s3gen_path, map_location=device)
-        t3_cfg_model = torch.load(t3_cfg_path, map_location=device)
-        ve_model = torch.load(ve_path, map_location=device)
-        
-        logger.info("Models loaded successfully!")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error loading models: {str(e)}")
-        return False
-
-
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
     return jsonify({
         "status": "healthy",
-        "models_loaded": models_loaded,
+        "tts_engine": "edge-tts",
+        "fallback": "gTTS" if GTTS_AVAILABLE else "none",
         "timestamp": datetime.now().isoformat()
     })
 
 
 @app.route('/api/tts/synthesize', methods=['POST'])
-@app.route('/synthesize', methods=['POST'])  # Add backward compatibility route
+@app.route('/synthesize', methods=['POST'])  # Backward compatibility
 def synthesize_speech():
     """
-    Synthesize speech from text using voice cloning
+    Synthesize speech from text.
+    
+    IMPORTANT: The text is used AS-IS for the specified language.
+    No auto-translation is performed. The frontend sends pre-translated text.
     
     Expected JSON:
     {
-        "text": "Ticket number 101 please come to counter 5",
-        "voice_sample": "path/to/voice/sample.wav",  # Optional
-        "language": "en",  # en, ur, ar
+        "text": "ٹکٹ نمبر 101 براہ کرم کاؤنٹر نمبر 5 پر تشریف لے جائیں",
+        "language": "ur",
+        "voice_type": "child",
         "speed": 1.0,
         "pitch": 1.0
     }
@@ -519,8 +499,7 @@ def synthesize_speech():
     try:
         data = request.json
         text = data.get('text', '')
-        voice_sample = data.get('voice_sample')
-        voice_type = data.get('voice_type', 'default')  # male, female, child, default
+        voice_type = data.get('voice_type', 'child')  # Default to child
         language = data.get('language', 'en')
         speed = data.get('speed', 1.0)
         pitch = data.get('pitch', 1.0)
@@ -528,48 +507,10 @@ def synthesize_speech():
         if not text:
             return jsonify({"error": "Text is required"}), 400
         
-        # Check if text is already in target language (skip translation)
-        # Detect if text contains Arabic/Urdu/Hindi characters
-        def contains_non_latin(text):
-            """Check if text contains non-Latin characters (Arabic, Urdu, Hindi, etc.)"""
-            import re
-            # Arabic: \u0600-\u06FF, \u0750-\u077F, \uFB50-\uFDFF, \uFE70-\uFEFF
-            # Devanagari (Hindi): \u0900-\u097F
-            pattern = re.compile(r'[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF\u0900-\u097F]')
-            return bool(pattern.search(text))
-        
-        # Auto-translate ONLY if text is in English and target is non-English
-        original_text = text
-        should_translate = language != 'en' and not contains_non_latin(text)
-        
-        if should_translate:
-            try:
-                logger.info(f"🌐 Auto-translating English text to {language}...")
-                logger.info(f"Original English text: '{original_text}'")
-                
-                # Replace dash with space before translation (so dash is not read)
-                text_to_translate = text.replace('-', ' ')
-                
-                # Create translator for target language
-                # Handle ar-ae (Dubai Arabic) - use standard 'ar'
-                target_lang = 'ar' if language == 'ar-ae' else language
-                translator = GoogleTranslator(source='en', target=target_lang)
-                text = translator.translate(text_to_translate)
-                
-                logger.info(f"✅ Translated to {language}: '{text}'")
-            except Exception as trans_err:
-                logger.warning(f"⚠️ Translation failed: {trans_err}, using original text")
-                # Continue with original text if translation fails
-        else:
-            if contains_non_latin(text):
-                logger.info(f"✅ Text already in non-Latin script ({language}), skipping translation")
-                logger.info(f"Text: '{text}'")
-            else:
-                logger.info(f"✅ Text is English for English language, no translation needed")
-        
-        # Ensure models are loaded (optional, only for ChatterBox)
-        if TORCH_AVAILABLE and not models_loaded:
-            load_models()  # Try to load but don't fail if it doesn't work
+        # ═══════════════════════════════════════════════════
+        # NO TRANSLATION — text is used exactly as received
+        # The frontend sends correctly translated text
+        # ═══════════════════════════════════════════════════
         
         logger.info(f"========== SYNTHESIS REQUEST ==========")
         logger.info(f"📝 Text: '{text}'")
@@ -577,18 +518,19 @@ def synthesize_speech():
         logger.info(f"🎤 Voice Type: {voice_type}")
         logger.info(f"⚡ Speed: {speed}")
         logger.info(f"🎵 Pitch: {pitch}")
+        logger.info(f"🚫 Translation: DISABLED (text used as-is)")
         logger.info(f"=======================================")
         
         output_filename = f"speech_{datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
         output_path = os.path.join(OUTPUT_DIR, output_filename)
         
-        # Generate speech using available TTS engines
+        # Generate speech — no translation, strict language matching
         success = generate_speech(text, output_path, language, speed, pitch, voice_type)
         
         if not success:
             return jsonify({"error": "Failed to generate speech"}), 500
         
-        # Check if MP3 was created instead of WAV (when pydub not available)
+        # Check if MP3 was created instead of WAV
         actual_filename = output_filename
         if not os.path.exists(output_path):
             mp3_path = output_path.replace('.wav', '.mp3')
@@ -675,76 +617,13 @@ def upload_voice_sample():
 
 @app.route('/api/tts/voices', methods=['GET'])
 def list_voices():
-    """List all available voice samples with dynamic system voices"""
+    """List all available voice options"""
     try:
-        voices = []
-        
-        # Add dynamic system voices from pyttsx3
-        try:
-            engine = pyttsx3.init()
-            system_voices = engine.getProperty('voices')
-            
-            # Keep track of voice type counts for unique IDs
-            voice_type_counter = {'male': 0, 'female': 0, 'child': 0, 'default': 0}
-            
-            for voice in system_voices:
-                voice_name = voice.name
-                voice_id_lower = voice.id.lower()
-                
-                # Determine voice type based on name/id
-                if 'david' in voice_name.lower() or 'male' in voice_id_lower:
-                    voice_type = 'male'
-                    icon = '👨'
-                elif 'zira' in voice_name.lower() or 'female' in voice_id_lower:
-                    voice_type = 'female'
-                    icon = '👩'
-                elif 'child' in voice_name.lower():
-                    voice_type = 'child'
-                    icon = '👶'
-                else:
-                    voice_type = 'default'
-                    icon = '🔊'
-                
-                # Increment counter for this voice type
-                voice_type_counter[voice_type] += 1
-                
-                # ONLY add first male and first female voice (English ones)
-                if voice_type == 'male' and voice_type_counter['male'] == 1:
-                    voices.append({
-                        "id": "male",  # Simple ID for primary voices
-                        "name": f"{icon} Male Voice",
-                        "type": "male",
-                        "system_name": voice_name,
-                        "source": "pyttsx3"
-                    })
-                elif voice_type == 'female' and voice_type_counter['female'] == 1:
-                    voices.append({
-                        "id": "female",  # Simple ID for primary voices
-                        "name": f"{icon} Female Voice",
-                        "type": "female",
-                        "system_name": voice_name,
-                        "source": "pyttsx3"
-                    })
-                elif voice_type == 'child' and voice_type_counter['child'] == 1:
-                    voices.append({
-                        "id": "child",
-                        "name": f"{icon} Child Voice",
-                        "type": "child",
-                        "system_name": voice_name,
-                        "source": "pyttsx3"
-                    })
-            
-            engine.stop()
-            logger.info(f"✅ Loaded {len(voices)} primary system voices from pyttsx3")
-            
-        except Exception as voice_error:
-            logger.warning(f"⚠️ Could not load pyttsx3 voices: {voice_error}")
-            # Fallback to default voices
-            voices = [
-                {"id": "male", "name": "👨 Male Voice", "type": "male", "source": "default"},
-                {"id": "female", "name": "👩 Female Voice", "type": "female", "source": "default"},
-                {"id": "child", "name": "👶 Child Voice", "type": "child", "source": "default"}
-            ]
+        voices = [
+            {"id": "child", "name": "👶 Child Boy Voice", "type": "child", "source": "edge-tts"},
+            {"id": "male", "name": "👨 Male Voice", "type": "male", "source": "edge-tts"},
+            {"id": "female", "name": "👩 Female Voice", "type": "female", "source": "edge-tts"},
+        ]
         
         # Add custom uploaded voice samples
         try:
@@ -772,23 +651,23 @@ def list_voices():
             "success": False,
             "error": str(e),
             "data": [
+                {"id": "child", "name": "👶 Child Boy Voice", "type": "child", "source": "fallback"},
                 {"id": "male", "name": "👨 Male Voice", "type": "male", "source": "fallback"},
-                {"id": "female", "name": "👩 Female Voice", "type": "female", "source": "fallback"},
-                {"id": "child", "name": "👶 Child Voice", "type": "child", "source": "fallback"}
+                {"id": "female", "name": "👩 Female Voice", "type": "female", "source": "fallback"}
             ]
-        }), 200  # Return 200 with fallback data instead of error
+        }), 200
 
 
 if __name__ == '__main__':
-    # Download models on startup (optional)
-    logger.info("Starting TTS Service with gTTS and pyttsx3...")
-    logger.info(f"Torch available: {TORCH_AVAILABLE}")
-    
-    if TORCH_AVAILABLE:
-        logger.info("ChatterBox models support enabled")
-        download_models()
-    else:
-        logger.info("Using gTTS and pyttsx3 for speech synthesis")
+    logger.info("═══════════════════════════════════════════════")
+    logger.info("🚀 Starting Edge-TTS Voice Calling Service")
+    logger.info("═══════════════════════════════════════════════")
+    logger.info(f"  Primary TTS:  edge-tts (Microsoft Edge Neural TTS)")
+    logger.info(f"  Fallback TTS: gTTS {'(available)' if GTTS_AVAILABLE else '(NOT available)'}")
+    logger.info(f"  Audio tools:  pydub {'(available)' if PYDUB_AVAILABLE else '(NOT available)'}")
+    logger.info(f"  Default voice: child boy (pitch +35%)")
+    logger.info(f"  Translation:  DISABLED (frontend sends translated text)")
+    logger.info("═══════════════════════════════════════════════")
     
     # Run the Flask app
     port = int(os.getenv('PORT', 2002))
