@@ -394,47 +394,46 @@ def generate_speech(text, output_path, language='en', speed=1.0, pitch=1.0, voic
     
     logger.info(f"🎙️ generate_speech called: lang={language}, voice={voice_type}, text='{text[:50]}...'")
     
-    if not EDGE_TTS_AVAILABLE:
-        logger.warning("⚠️ edge-tts module is not installed! Skipping Edge-TTS generation.")
-        # Force jump to exception handling / fallback by raising a custom error
-        raise ImportError("edge-tts module not installed")
-    
     # ═══════════════════════════════════════════════════
     # PRIMARY: Edge-TTS (best quality, native multi-language, SSML pitch for child voice)
     # ═══════════════════════════════════════════════════
-    try:
-        # Run async edge-tts in a dedicated thread to avoid event loop conflicts
-        edge_result = [False]
-        edge_error = [None]
-        
-        def run_edge_tts():
-            try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    edge_result[0] = loop.run_until_complete(
-                        generate_speech_edge_tts(text, output_path, language, speed, pitch, voice_type)
-                    )
-                finally:
-                    loop.close()
-            except Exception as e:
-                edge_error[0] = e
-        
-        thread = threading.Thread(target=run_edge_tts)
-        thread.start()
-        thread.join(timeout=30)  # 30 second timeout
-        
-        if edge_error[0]:
-            raise edge_error[0]
-        
-        if edge_result[0]:
-            logger.info(f"✅ Speech generated successfully with Edge-TTS")
-            return True
-        else:
-            logger.warning("⚠️ Edge-TTS returned False, trying fallback...")
+    if EDGE_TTS_AVAILABLE:
+        try:
+            # Run async edge-tts in a dedicated thread to avoid event loop conflicts
+            edge_result = [False]
+            edge_error = [None]
             
-    except Exception as edge_err:
-        logger.error(f"❌ Edge-TTS exception: {str(edge_err)}")
+            def run_edge_tts():
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        edge_result[0] = loop.run_until_complete(
+                            generate_speech_edge_tts(text, output_path, language, speed, pitch, voice_type)
+                        )
+                    finally:
+                        loop.close()
+                except Exception as e:
+                    edge_error[0] = e
+            
+            thread = threading.Thread(target=run_edge_tts)
+            thread.start()
+            thread.join(timeout=30)  # 30 second timeout
+            
+            if edge_error[0]:
+                raise edge_error[0]
+            
+            if edge_result[0]:
+                logger.info(f"✅ Speech generated successfully with Edge-TTS")
+                return True
+            else:
+                logger.warning("⚠️ Edge-TTS returned False, trying fallback...")
+                
+        except Exception as edge_err:
+            logger.error(f"❌ Edge-TTS exception: {str(edge_err)}")
+            logger.info("🔄 Falling back to gTTS...")
+    else:
+        logger.warning("⚠️ edge-tts module is not installed! Skipping Edge-TTS generation.")
         logger.info("🔄 Falling back to gTTS...")
     
     # ═══════════════════════════════════════════════════
